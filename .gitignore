@@ -1,0 +1,11 @@
+# Bundler
+/.bundle/
+/Gemfile.lock
+/vendor/
+
+# Build artifacts
+/lib/facter/**/*.so
+/Makefile
+/pkg/
+/ports/
+/tmp/

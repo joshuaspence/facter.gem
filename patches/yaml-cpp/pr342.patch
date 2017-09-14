@@ -1,0 +1,766 @@
+From 24fa1b33805c9a91df0f32c46c28e314dd7ad96f Mon Sep 17 00:00:00 2001
+From: Matt Blair <blair1618@gmail.com>
+Date: Mon, 27 Apr 2015 16:58:38 -0400
+Subject: [PATCH] Replace Boost usage with C++11 features
+
+ - Adds 'std=c++11' compiler flags
+ - Replaces boost::type_traits with std::type_traits
+ - Replaces boost::shared_ptr with std::shared_ptr
+ - Replaces std::auto_ptr with std::unique_ptr
+ - Replaces raw pointers with std::unique_ptr in ptr_vector, ptr_stack, and SettingChanges
+ - Replaces boost::noncopyable with deleted copy and assignment operators
+ - Replaces boost::next with std::next
+ - Replaces boost::enable_if with std::enable_if
+ - Replaces boost::is_convertible with std::is_convertible
+ - Replaces ptrdiff_t with std::ptrdiff_t
+ - Replaces boost::iterator_facade and boost::iterator_adaptor with std::iterator, borrowing the 'proxy reference' technique from boost
+ - Removes Boost dependency from CMakeLists
+ - Formats changed files using clang-format
+---
+ CMakeLists.txt                               |  4 +-
+ include/yaml-cpp/emitter.h                   |  2 +-
+ include/yaml-cpp/node/detail/impl.h          | 10 ++---
+ include/yaml-cpp/node/detail/iterator.h      | 60 ++++++++++++++++++++--------
+ include/yaml-cpp/node/detail/node.h          |  9 ++---
+ include/yaml-cpp/node/detail/node_data.h     |  6 +--
+ include/yaml-cpp/node/detail/node_iterator.h | 45 +++++++++++++++------
+ include/yaml-cpp/node/detail/node_ref.h      |  5 ++-
+ include/yaml-cpp/node/ptr.h                  | 12 +++---
+ include/yaml-cpp/parser.h                    |  4 +-
+ src/emitterstate.cpp                         | 12 ++++--
+ src/node_data.cpp                            |  8 ++--
+ src/ptr_stack.h                              | 31 ++++++++------
+ src/ptr_vector.h                             | 20 +++++-----
+ src/scanner.cpp                              |  8 ++--
+ src/setting.h                                | 24 +++++------
+ src/singledocparser.h                        |  2 +-
+ test/CMakeLists.txt                          |  2 +-
+ util/CMakeLists.txt                          |  3 ++
+ 19 files changed, 160 insertions(+), 107 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0edf87f1..bc3db318 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -113,8 +113,6 @@ endif()
+ include_directories(${YAML_CPP_SOURCE_DIR}/src)
+ include_directories(${YAML_CPP_SOURCE_DIR}/include)
+ 
+-find_package(Boost REQUIRED)
+-include_directories(${Boost_INCLUDE_DIRS})
+ 
+ 
+ ###
+@@ -181,7 +179,7 @@ if("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU" OR
+ 		set(GCC_EXTRA_OPTIONS "${GCC_EXTRA_OPTIONS} ${FLAG_TESTED}")
+ 	endif()
+ 	#
+-	set(yaml_cxx_flags "-Wall ${GCC_EXTRA_OPTIONS} -pedantic -Wno-long-long ${yaml_cxx_flags}")
++	set(yaml_cxx_flags "-Wall ${GCC_EXTRA_OPTIONS} -pedantic -Wno-long-long -std=c++11 ${yaml_cxx_flags}")
+ 
+ 	### Make specific
+ 	if(${CMAKE_BUILD_TOOL} MATCHES make OR ${CMAKE_BUILD_TOOL} MATCHES gmake)
+diff --git a/include/yaml-cpp/emitter.h b/include/yaml-cpp/emitter.h
+index cc49659c..5bffc25a 100644
+--- a/include/yaml-cpp/emitter.h
++++ b/include/yaml-cpp/emitter.h
+@@ -122,7 +122,7 @@ class YAML_CPP_API Emitter : private noncopyable {
+   bool CanEmitNewline() const;
+ 
+  private:
+-  std::auto_ptr<EmitterState> m_pState;
++  std::unique_ptr<EmitterState> m_pState;
+   ostream_wrapper m_stream;
+ };
+ 
+diff --git a/include/yaml-cpp/node/detail/impl.h b/include/yaml-cpp/node/detail/impl.h
+index f6d218c8..69f44768 100644
+--- a/include/yaml-cpp/node/detail/impl.h
++++ b/include/yaml-cpp/node/detail/impl.h
+@@ -9,7 +9,7 @@
+ 
+ #include "yaml-cpp/node/detail/node.h"
+ #include "yaml-cpp/node/detail/node_data.h"
+-#include <boost/type_traits.hpp>
++#include <type_traits>
+ 
+ namespace YAML {
+ namespace detail {
+@@ -22,9 +22,9 @@ struct get_idx {
+ };
+ 
+ template <typename Key>
+-struct get_idx<
+-    Key, typename boost::enable_if_c<boost::is_unsigned<Key>::value &&
+-                                     !boost::is_same<Key, bool>::value>::type> {
++struct get_idx<Key,
++               typename std::enable_if<std::is_unsigned<Key>::value &&
++                                       !std::is_same<Key, bool>::value>::type> {
+   static node* get(const std::vector<node*>& sequence, const Key& key,
+                    shared_memory_holder /* pMemory */) {
+     return key < sequence.size() ? sequence[key] : 0;
+@@ -41,7 +41,7 @@ struct get_idx<
+ };
+ 
+ template <typename Key>
+-struct get_idx<Key, typename boost::enable_if<boost::is_signed<Key> >::type> {
++struct get_idx<Key, typename std::enable_if<std::is_signed<Key>::value>::type> {
+   static node* get(const std::vector<node*>& sequence, const Key& key,
+                    shared_memory_holder pMemory) {
+     return key >= 0 ? get_idx<std::size_t>::get(
+diff --git a/include/yaml-cpp/node/detail/iterator.h b/include/yaml-cpp/node/detail/iterator.h
+index 2c701af5..cc5f9d34 100644
+--- a/include/yaml-cpp/node/detail/iterator.h
++++ b/include/yaml-cpp/node/detail/iterator.h
+@@ -10,45 +10,68 @@
+ #include "yaml-cpp/dll.h"
+ #include "yaml-cpp/node/ptr.h"
+ #include "yaml-cpp/node/detail/node_iterator.h"
+-#include <boost/iterator/iterator_adaptor.hpp>
+-#include <boost/utility.hpp>
++#include <cstddef>
++#include <iterator>
+ 
+ namespace YAML {
+ namespace detail {
+ struct iterator_value;
+ 
+ template <typename V>
+-class iterator_base
+-    : public boost::iterator_adaptor<iterator_base<V>, node_iterator, V,
+-                                     std::forward_iterator_tag, V> {
++class iterator_base : public std::iterator<std::forward_iterator_tag, V,
++                                           std::ptrdiff_t, V*, V> {
++
+  private:
+   template <typename>
+   friend class iterator_base;
+   struct enabler {};
+-  typedef typename iterator_base::base_type base_type;
++  typedef node_iterator base_type;
++
++  struct proxy {
++    explicit proxy(const V& x) : m_ref(x) {}
++    V* operator->() { return std::addressof(m_ref); }
++    operator V*() { return std::addressof(m_ref); }
++
++    V m_ref;
++  };
+ 
+  public:
+   typedef typename iterator_base::value_type value_type;
+ 
+  public:
+-  iterator_base() {}
++  iterator_base() : m_iterator(), m_pMemory() {}
+   explicit iterator_base(base_type rhs, shared_memory_holder pMemory)
+-      : iterator_base::iterator_adaptor_(rhs), m_pMemory(pMemory) {}
++      : m_iterator(rhs), m_pMemory(pMemory) {}
+ 
+   template <class W>
+   iterator_base(const iterator_base<W>& rhs,
+-                typename boost::enable_if<boost::is_convertible<W*, V*>,
+-                                          enabler>::type = enabler())
+-      : iterator_base::iterator_adaptor_(rhs.base()),
+-        m_pMemory(rhs.m_pMemory) {}
++                typename std::enable_if<std::is_convertible<W*, V*>::value,
++                                        enabler>::type = enabler())
++      : m_iterator(rhs.m_iterator), m_pMemory(rhs.m_pMemory) {}
+ 
+- private:
+-  friend class boost::iterator_core_access;
++  iterator_base<V>& operator++() {
++    ++m_iterator;
++    return *this;
++  }
+ 
+-  void increment() { this->base_reference() = boost::next(this->base()); }
++  iterator_base<V> operator++(int) {
++    iterator_base<V> iterator_pre(*this);
++    ++(*this);
++    return iterator_pre;
++  }
+ 
+-  value_type dereference() const {
+-    const typename base_type::value_type& v = *this->base();
++  template <typename W>
++  bool operator==(const iterator_base<W>& rhs) {
++    return m_iterator == rhs.m_iterator;
++  }
++
++  template <typename W>
++  bool operator!=(const iterator_base<W>& rhs) {
++    return m_iterator != rhs.m_iterator;
++  }
++
++  value_type operator*() const {
++    const typename base_type::value_type& v = *m_iterator;
+     if (v.pNode)
+       return value_type(Node(*v, m_pMemory));
+     if (v.first && v.second)
+@@ -56,7 +79,10 @@ class iterator_base
+     return value_type();
+   }
+ 
++  proxy operator->() const { return proxy(**this); }
++
+  private:
++  base_type m_iterator;
+   shared_memory_holder m_pMemory;
+ };
+ }
+diff --git a/include/yaml-cpp/node/detail/node.h b/include/yaml-cpp/node/detail/node.h
+index bbb497d7..3154a527 100644
+--- a/include/yaml-cpp/node/detail/node.h
++++ b/include/yaml-cpp/node/detail/node.h
+@@ -13,13 +13,14 @@
+ #include "yaml-cpp/node/ptr.h"
+ #include "yaml-cpp/node/detail/node_ref.h"
+ #include <set>
+-#include <boost/utility.hpp>
+ 
+ namespace YAML {
+ namespace detail {
+-class node : private boost::noncopyable {
++class node {
+  public:
+   node() : m_pRef(new node_ref) {}
++  node(const node&) = delete;
++  node& operator=(const node&) = delete;
+ 
+   bool is(const node& rhs) const { return m_pRef == rhs.m_pRef; }
+   const node_ref* ref() const { return m_pRef.get(); }
+@@ -65,9 +66,7 @@ class node : private boost::noncopyable {
+     m_pRef->set_data(*rhs.m_pRef);
+   }
+ 
+-  void set_mark(const Mark& mark) {
+-    m_pRef->set_mark(mark);
+-  }
++  void set_mark(const Mark& mark) { m_pRef->set_mark(mark); }
+ 
+   void set_type(NodeType::value type) {
+     if (type != NodeType::Undefined)
+diff --git a/include/yaml-cpp/node/detail/node_data.h b/include/yaml-cpp/node/detail/node_data.h
+index 60308673..64bbc05d 100644
+--- a/include/yaml-cpp/node/detail/node_data.h
++++ b/include/yaml-cpp/node/detail/node_data.h
+@@ -7,8 +7,6 @@
+ #pragma once
+ #endif
+ 
+-#include <boost/noncopyable.hpp>
+-#include <boost/utility.hpp>
+ #include <list>
+ #include <map>
+ #include <string>
+@@ -29,9 +27,11 @@ class node;
+ 
+ namespace YAML {
+ namespace detail {
+-class YAML_CPP_API node_data : private boost::noncopyable {
++class YAML_CPP_API node_data {
+  public:
+   node_data();
++  node_data(const node_data&) = delete;
++  node_data& operator=(const node_data&) = delete;
+ 
+   void mark_defined();
+   void set_mark(const Mark& mark);
+diff --git a/include/yaml-cpp/node/detail/node_iterator.h b/include/yaml-cpp/node/detail/node_iterator.h
+index 9669c819..a33049aa 100644
+--- a/include/yaml-cpp/node/detail/node_iterator.h
++++ b/include/yaml-cpp/node/detail/node_iterator.h
+@@ -9,8 +9,9 @@
+ 
+ #include "yaml-cpp/dll.h"
+ #include "yaml-cpp/node/ptr.h"
+-#include <boost/iterator/iterator_facade.hpp>
+-#include <boost/utility/enable_if.hpp>
++#include <cstddef>
++#include <iterator>
++#include <memory>
+ #include <map>
+ #include <utility>
+ #include <vector>
+@@ -52,12 +53,20 @@ struct node_iterator_type<const V> {
+ 
+ template <typename V>
+ class node_iterator_base
+-    : public boost::iterator_facade<
+-          node_iterator_base<V>, node_iterator_value<V>,
+-          std::forward_iterator_tag, node_iterator_value<V> > {
++    : public std::iterator<std::forward_iterator_tag, node_iterator_value<V>,
++                           std::ptrdiff_t, node_iterator_value<V>*,
++                           node_iterator_value<V> > {
+  private:
+   struct enabler {};
+ 
++  struct proxy {
++    explicit proxy(const node_iterator_value<V>& x) : m_ref(x) {}
++    node_iterator_value<V>* operator->() { return std::addressof(m_ref); }
++    operator node_iterator_value<V>*() { return std::addressof(m_ref); }
++
++    node_iterator_value<V> m_ref;
++  };
++
+  public:
+   typedef typename node_iterator_type<V>::seq SeqIter;
+   typedef typename node_iterator_type<V>::map MapIter;
+@@ -80,20 +89,18 @@ class node_iterator_base
+ 
+   template <typename W>
+   node_iterator_base(const node_iterator_base<W>& rhs,
+-                     typename boost::enable_if<boost::is_convertible<W*, V*>,
+-                                               enabler>::type = enabler())
++                     typename std::enable_if<std::is_convertible<W*, V*>::value,
++                                             enabler>::type = enabler())
+       : m_type(rhs.m_type),
+         m_seqIt(rhs.m_seqIt),
+         m_mapIt(rhs.m_mapIt),
+         m_mapEnd(rhs.m_mapEnd) {}
+ 
+- private:
+-  friend class boost::iterator_core_access;
+   template <typename>
+   friend class node_iterator_base;
+ 
+   template <typename W>
+-  bool equal(const node_iterator_base<W>& rhs) const {
++  bool operator==(const node_iterator_base<W>& rhs) const {
+     if (m_type != rhs.m_type)
+       return false;
+ 
+@@ -108,7 +115,12 @@ class node_iterator_base
+     return true;
+   }
+ 
+-  void increment() {
++  template <typename W>
++  bool operator!=(const node_iterator_base<W>& rhs) const {
++    return !(*this == rhs);
++  }
++
++  node_iterator_base<V>& operator++() {
+     switch (m_type) {
+       case iterator_type::None:
+         break;
+@@ -120,9 +132,16 @@ class node_iterator_base
+         m_mapIt = increment_until_defined(m_mapIt);
+         break;
+     }
++    return *this;
++  }
++
++  node_iterator_base<V> operator++(int) {
++    node_iterator_base<V> iterator_pre(*this);
++    ++(*this);
++    return iterator_pre;
+   }
+ 
+-  value_type dereference() const {
++  value_type operator*() const {
+     switch (m_type) {
+       case iterator_type::None:
+         return value_type();
+@@ -134,6 +153,8 @@ class node_iterator_base
+     return value_type();
+   }
+ 
++  proxy operator->() const { return proxy(**this); }
++
+   MapIter increment_until_defined(MapIter it) {
+     while (it != m_mapEnd && !is_defined(it))
+       ++it;
+diff --git a/include/yaml-cpp/node/detail/node_ref.h b/include/yaml-cpp/node/detail/node_ref.h
+index 26b1872d..d8a94f8b 100644
+--- a/include/yaml-cpp/node/detail/node_ref.h
++++ b/include/yaml-cpp/node/detail/node_ref.h
+@@ -11,13 +11,14 @@
+ #include "yaml-cpp/node/type.h"
+ #include "yaml-cpp/node/ptr.h"
+ #include "yaml-cpp/node/detail/node_data.h"
+-#include <boost/utility.hpp>
+ 
+ namespace YAML {
+ namespace detail {
+-class node_ref : private boost::noncopyable {
++class node_ref {
+  public:
+   node_ref() : m_pData(new node_data) {}
++  node_ref(const node_ref&) = delete;
++  node_ref& operator=(const node_ref&) = delete;
+ 
+   bool is_defined() const { return m_pData->is_defined(); }
+   const Mark& mark() const { return m_pData->mark(); }
+diff --git a/include/yaml-cpp/node/ptr.h b/include/yaml-cpp/node/ptr.h
+index 64c86891..ce085dd5 100644
+--- a/include/yaml-cpp/node/ptr.h
++++ b/include/yaml-cpp/node/ptr.h
+@@ -8,7 +8,7 @@
+ #endif
+ 
+ #include "yaml-cpp/dll.h"
+-#include <boost/shared_ptr.hpp>
++#include <memory>
+ 
+ namespace YAML {
+ namespace detail {
+@@ -18,11 +18,11 @@ class node_data;
+ class memory;
+ class memory_holder;
+ 
+-typedef boost::shared_ptr<node> shared_node;
+-typedef boost::shared_ptr<node_ref> shared_node_ref;
+-typedef boost::shared_ptr<node_data> shared_node_data;
+-typedef boost::shared_ptr<memory_holder> shared_memory_holder;
+-typedef boost::shared_ptr<memory> shared_memory;
++typedef std::shared_ptr<node> shared_node;
++typedef std::shared_ptr<node_ref> shared_node_ref;
++typedef std::shared_ptr<node_data> shared_node_data;
++typedef std::shared_ptr<memory_holder> shared_memory_holder;
++typedef std::shared_ptr<memory> shared_memory;
+ }
+ }
+ 
+diff --git a/include/yaml-cpp/parser.h b/include/yaml-cpp/parser.h
+index 24880e4f..edbfd8fd 100644
+--- a/include/yaml-cpp/parser.h
++++ b/include/yaml-cpp/parser.h
+@@ -40,8 +40,8 @@ class YAML_CPP_API Parser : private noncopyable {
+   void HandleTagDirective(const Token& token);
+ 
+  private:
+-  std::auto_ptr<Scanner> m_pScanner;
+-  std::auto_ptr<Directives> m_pDirectives;
++  std::unique_ptr<Scanner> m_pScanner;
++  std::unique_ptr<Directives> m_pDirectives;
+ };
+ }
+ 
+diff --git a/src/emitterstate.cpp b/src/emitterstate.cpp
+index a0874ac9..aa3e7847 100644
+--- a/src/emitterstate.cpp
++++ b/src/emitterstate.cpp
+@@ -124,10 +124,14 @@ void EmitterState::StartedGroup(GroupType::value type) {
+   const int lastGroupIndent = (m_groups.empty() ? 0 : m_groups.top().indent);
+   m_curIndent += lastGroupIndent;
+ 
+-  std::auto_ptr<Group> pGroup(new Group(type));
++  // TODO: Create move constructors for settings types to simplify transfer
++  std::unique_ptr<Group> pGroup(new Group(type));
+ 
+   // transfer settings (which last until this group is done)
+-  pGroup->modifiedSettings = m_modifiedSettings;
++  //
++  // NB: if pGroup->modifiedSettings == m_modifiedSettings,
++  // m_modifiedSettings is not changed!
++  pGroup->modifiedSettings = std::move(m_modifiedSettings);
+ 
+   // set up group
+   if (GetFlowType(type) == Block)
+@@ -136,7 +140,7 @@ void EmitterState::StartedGroup(GroupType::value type) {
+     pGroup->flowType = FlowType::Flow;
+   pGroup->indent = GetIndent();
+ 
+-  m_groups.push(pGroup);
++  m_groups.push(std::move(pGroup));
+ }
+ 
+ void EmitterState::EndedGroup(GroupType::value type) {
+@@ -149,7 +153,7 @@ void EmitterState::EndedGroup(GroupType::value type) {
+ 
+   // get rid of the current group
+   {
+-    std::auto_ptr<Group> pFinishedGroup = m_groups.pop();
++    std::unique_ptr<Group> pFinishedGroup = m_groups.pop();
+     if (pFinishedGroup->type != type)
+       return SetError(ErrorMsg::UNMATCHED_GROUP_TAG);
+   }
+diff --git a/src/node_data.cpp b/src/node_data.cpp
+index a1ca9002..a8629461 100644
+--- a/src/node_data.cpp
++++ b/src/node_data.cpp
+@@ -1,5 +1,5 @@
+ #include <assert.h>
+-#include <boost/smart_ptr/shared_ptr.hpp>
++#include <iterator>
+ #include <sstream>
+ 
+ #include "yaml-cpp/exceptions.h"
+@@ -28,9 +28,7 @@ void node_data::mark_defined() {
+   m_isDefined = true;
+ }
+ 
+-void node_data::set_mark(const Mark& mark) {
+-  m_mark = mark;
+-}
++void node_data::set_mark(const Mark& mark) { m_mark = mark; }
+ 
+ void node_data::set_type(NodeType::value type) {
+   if (type == NodeType::Undefined) {
+@@ -104,7 +102,7 @@ void node_data::compute_seq_size() const {
+ void node_data::compute_map_size() const {
+   kv_pairs::iterator it = m_undefinedPairs.begin();
+   while (it != m_undefinedPairs.end()) {
+-    kv_pairs::iterator jt = boost::next(it);
++    kv_pairs::iterator jt = std::next(it);
+     if (it->first->is_defined() && it->second->is_defined())
+       m_undefinedPairs.erase(it);
+     it = jt;
+diff --git a/src/ptr_stack.h b/src/ptr_stack.h
+index f378ffc1..b71eb99f 100644
+--- a/src/ptr_stack.h
++++ b/src/ptr_stack.h
+@@ -14,40 +14,45 @@
+ 
+ #include "yaml-cpp/noncopyable.h"
+ 
++// TODO: This class is no longer needed
+ template <typename T>
+ class ptr_stack : private YAML::noncopyable {
+  public:
+   ptr_stack() {}
+-  ~ptr_stack() { clear(); }
+ 
+   void clear() {
+-    for (std::size_t i = 0; i < m_data.size(); i++)
+-      delete m_data[i];
+     m_data.clear();
+   }
+ 
+   std::size_t size() const { return m_data.size(); }
+   bool empty() const { return m_data.empty(); }
+ 
+-  void push(std::auto_ptr<T> t) {
+-    m_data.push_back(NULL);
+-    m_data.back() = t.release();
++  void push(std::unique_ptr<T>&& t) {
++    m_data.push_back(std::move(t));
+   }
+-  std::auto_ptr<T> pop() {
+-    std::auto_ptr<T> t(m_data.back());
++  std::unique_ptr<T> pop() {
++   std::unique_ptr<T> t(std::move(m_data.back()));
+     m_data.pop_back();
+     return t;
+   }
+-  T& top() { return *m_data.back(); }
+-  const T& top() const { return *m_data.back(); }
+ 
+-  T& top(std::ptrdiff_t diff) { return **(m_data.end() - 1 + diff); }
++  T& top() {
++    return *(m_data.back().get());
++  }
++  const T& top() const {
++    return *(m_data.back().get());
++  }
++
++  T& top(std::ptrdiff_t diff) {
++    return *((m_data.end() - 1 + diff)->get());
++  }
++
+   const T& top(std::ptrdiff_t diff) const {
+-    return **(m_data.end() - 1 + diff);
++    return *((m_data.end() - 1 + diff)->get());
+   }
+ 
+  private:
+-  std::vector<T*> m_data;
++    std::vector<std::unique_ptr<T>> m_data;
+ };
+ 
+ #endif  // PTR_STACK_H_62B23520_7C8E_11DE_8A39_0800200C9A66
+diff --git a/src/ptr_vector.h b/src/ptr_vector.h
+index a546a895..3ebed28a 100644
+--- a/src/ptr_vector.h
++++ b/src/ptr_vector.h
+@@ -16,33 +16,35 @@
+ 
+ namespace YAML {
+ 
++// TODO: This class is no longer needed
+ template <typename T>
+ class ptr_vector : private YAML::noncopyable {
+  public:
+   ptr_vector() {}
+-  ~ptr_vector() { clear(); }
+ 
+   void clear() {
+-    for (std::size_t i = 0; i < m_data.size(); i++)
+-      delete m_data[i];
+     m_data.clear();
+   }
+ 
+   std::size_t size() const { return m_data.size(); }
+   bool empty() const { return m_data.empty(); }
+ 
+-  void push_back(std::auto_ptr<T> t) {
+-    m_data.push_back(NULL);
+-    m_data.back() = t.release();
++  void push_back(std::unique_ptr<T>&& t) {
++    m_data.push_back(std::move(t));
+   }
+   T& operator[](std::size_t i) { return *m_data[i]; }
+   const T& operator[](std::size_t i) const { return *m_data[i]; }
+ 
+-  T& back() { return *m_data.back(); }
+-  const T& back() const { return *m_data.back(); }
++  T& back() {
++      return *(m_data.back().get());
++  }
++
++  const T& back() const {
++      return *(m_data.back().get());
++  }
+ 
+  private:
+-  std::vector<T*> m_data;
++   std::vector<std::unique_ptr<T>> m_data;
+ };
+ }
+ 
+diff --git a/src/scanner.cpp b/src/scanner.cpp
+index 680c73bf..767b8e13 100644
+--- a/src/scanner.cpp
++++ b/src/scanner.cpp
+@@ -233,8 +233,8 @@ const RegEx& Scanner::GetValueRegex() const {
+ void Scanner::StartStream() {
+   m_startedStream = true;
+   m_simpleKeyAllowed = true;
+-  std::auto_ptr<IndentMarker> pIndent(new IndentMarker(-1, IndentMarker::NONE));
+-  m_indentRefs.push_back(pIndent);
++  std::unique_ptr<IndentMarker> pIndent(new IndentMarker(-1, IndentMarker::NONE));
++  m_indentRefs.push_back(std::move(pIndent));
+   m_indents.push(&m_indentRefs.back());
+ }
+ 
+@@ -281,7 +281,7 @@ Scanner::IndentMarker* Scanner::PushIndentTo(int column,
+   if (InFlowContext())
+     return 0;
+ 
+-  std::auto_ptr<IndentMarker> pIndent(new IndentMarker(column, type));
++  std::unique_ptr<IndentMarker> pIndent(new IndentMarker(column, type));
+   IndentMarker& indent = *pIndent;
+   const IndentMarker& lastIndent = *m_indents.top();
+ 
+@@ -298,7 +298,7 @@ Scanner::IndentMarker* Scanner::PushIndentTo(int column,
+ 
+   // and then the indent
+   m_indents.push(&indent);
+-  m_indentRefs.push_back(pIndent);
++  m_indentRefs.push_back(std::move(pIndent));
+   return &m_indentRefs.back();
+ }
+ 
+diff --git a/src/setting.h b/src/setting.h
+index 3ff8c209..b78d40e2 100644
+--- a/src/setting.h
++++ b/src/setting.h
+@@ -20,7 +20,7 @@ class Setting {
+   Setting() : m_value() {}
+ 
+   const T get() const { return m_value; }
+-  std::auto_ptr<SettingChangeBase> set(const T& value);
++  std::unique_ptr<SettingChangeBase> set(const T& value);
+   void restore(const Setting<T>& oldSetting) { m_value = oldSetting.get(); }
+ 
+  private:
+@@ -49,8 +49,8 @@ class SettingChange : public SettingChangeBase {
+ };
+ 
+ template <typename T>
+-inline std::auto_ptr<SettingChangeBase> Setting<T>::set(const T& value) {
+-  std::auto_ptr<SettingChangeBase> pChange(new SettingChange<T>(this));
++inline std::unique_ptr<SettingChangeBase> Setting<T>::set(const T& value) {
++  std::unique_ptr<SettingChangeBase> pChange(new SettingChange<T>(this));
+   m_value = value;
+   return pChange;
+ }
+@@ -62,10 +62,6 @@ class SettingChanges : private noncopyable {
+ 
+   void clear() {
+     restore();
+-
+-    for (setting_changes::const_iterator it = m_settingChanges.begin();
+-         it != m_settingChanges.end(); ++it)
+-      delete *it;
+     m_settingChanges.clear();
+   }
+ 
+@@ -75,23 +71,23 @@ class SettingChanges : private noncopyable {
+       (*it)->pop();
+   }
+ 
+-  void push(std::auto_ptr<SettingChangeBase> pSettingChange) {
+-    m_settingChanges.push_back(pSettingChange.release());
++  void push(std::unique_ptr<SettingChangeBase> pSettingChange) {
++    m_settingChanges.push_back(std::move(pSettingChange));
+   }
+ 
+-  // like std::auto_ptr - assignment is transfer of ownership
+-  SettingChanges& operator=(SettingChanges& rhs) {
++  // like std::unique_ptr - assignment is transfer of ownership
++  SettingChanges& operator=(SettingChanges&& rhs) {
+     if (this == &rhs)
+       return *this;
+ 
+     clear();
+-    m_settingChanges = rhs.m_settingChanges;
+-    rhs.m_settingChanges.clear();
++    std::swap(m_settingChanges, rhs.m_settingChanges);
++
+     return *this;
+   }
+ 
+  private:
+-  typedef std::vector<SettingChangeBase*> setting_changes;
++  typedef std::vector<std::unique_ptr<SettingChangeBase>> setting_changes;
+   setting_changes m_settingChanges;
+ };
+ }
+diff --git a/src/singledocparser.h b/src/singledocparser.h
+index ed0aad50..2b92067c 100644
+--- a/src/singledocparser.h
++++ b/src/singledocparser.h
+@@ -53,7 +53,7 @@ class SingleDocParser : private noncopyable {
+  private:
+   Scanner& m_scanner;
+   const Directives& m_directives;
+-  std::auto_ptr<CollectionStack> m_pCollectionStack;
++  std::unique_ptr<CollectionStack> m_pCollectionStack;
+ 
+   typedef std::map<std::string, anchor_t> Anchors;
+   Anchors m_anchors;
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index 61f1f7f6..cf06c9a0 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -10,7 +10,7 @@ endif()
+ 
+ if("${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU" OR
+    "${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
+-  set(yaml_test_flags "-Wno-c99-extensions -Wno-variadic-macros -Wno-sign-compare")
++  set(yaml_test_flags "-Wno-c99-extensions -Wno-variadic-macros -Wno-sign-compare -std=c++11")
+ endif()
+ 
+ file(GLOB test_headers [a-z_]*.h)
+diff --git a/util/CMakeLists.txt b/util/CMakeLists.txt
+index 8a696314..22866273 100644
+--- a/util/CMakeLists.txt
++++ b/util/CMakeLists.txt
+@@ -1,11 +1,14 @@
+ add_sources(parse.cpp)
+ add_executable(parse parse.cpp)
+ target_link_libraries(parse yaml-cpp)
++set_target_properties(parse PROPERTIES COMPILE_FLAGS "-std=c++11")
+ 
+ add_sources(sandbox.cpp)
+ add_executable(sandbox sandbox.cpp)
+ target_link_libraries(sandbox yaml-cpp)
++set_target_properties(sandbox PROPERTIES COMPILE_FLAGS "-std=c++11")
+ 
+ add_sources(read.cpp)
+ add_executable(read read.cpp)
+ target_link_libraries(read yaml-cpp)
++set_target_properties(read PROPERTIES COMPILE_FLAGS "-std=c++11")
